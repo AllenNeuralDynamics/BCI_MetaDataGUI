@@ -9,10 +9,10 @@ from aind_metadata_mapper.bergamo.session import ( BergamoEtl,
                                                   )
 import bergamo_rig
 from typing import Optional
-from aind_data_transfer_models.core import (
-    ModalityConfigs,
-    BasicUploadJobConfigs,
-    SubmitJobRequest,
+from aind_data_transfer_service.models.core import (
+    UploadJobConfigsV2,
+    SubmitJobRequestV2,
+    Task
 )
 from aind_data_schema_models.modalities import Modality
 from aind_data_schema_models.platforms import Platform
@@ -247,53 +247,90 @@ class cloudTransferWorker(QRunnable):
         thisMouse = self.params.get('WRname')
         dateEnteredAs = self.params.get('date')
         subject_id = self.params['subjectID']
-        service_url = "http://aind-data-transfer-service/api/v1/submit_jobs" # For testing purposes, use http://aind-data-transfer-service-dev/api/v1/submit_jobs
+        service_url = "http://aind-data-transfer-service/api/v2/submit_jobs" # For testing purposes, use http://aind-data-transfer-service-dev/api/v2/submit_jobs
         project_name = "Brain Computer Interface"
-        s3_bucket = "private"
+        s3_bucket = "default"
         platform = Platform.SINGLE_PLANE_OPHYS
+        job_type = "default"
         print(self.params['sessionStart'])
 
         #acquisition_datetime = datetime.fromisoformat("2024-10-23T15:30:39") #find correct way to state the acq_datetime
         codeocean_pipeline_id = "a2c94161-7183-46ea-8b70-79b82bb77dc0"
         codeocean_pipeline_mount: Optional[str] = "ophys"
 
+        pophys_task = Task(
+            job_settings={
+                "input_source": f"//allen/aind/scratch/BCI/2p-raw/{thisMouse}/{dateEnteredAs}/pophys"
+            }
+        )
+        behavior_video_task = Task(
+            job_settings={
+                "input_source": f"//allen/aind/scratch/BCI/2p-raw/{thisMouse}/{dateEnteredAs}/behavior_video"
+            }
+        )
+        behavior_task = Task(
+            job_settings={
+                "input_source": f"//allen/aind/scratch/BCI/2p-raw/{thisMouse}/{dateEnteredAs}/behavior"
+            }
+        )
+
+        modality_transformation_settings = {
+            Modality.POPHYS.abbreviation: pophys_task,
+            Modality.BEHAVIOR_VIDEOS.abbreviation: behavior_video_task,
+            Modality.BEHAVIOR.abbreviation: behavior_task
+        }
+
+        gather_preliminary_metadata = Task(
+            job_settings={
+                "metadata_dir": (
+                    f"/allen/aind/scratch/BCI/2p-raw/{thisMouse}/{dateEnteredAs}"
+                )
+            }
+        )
+
+        pophys_codeocean_pipeline_settings = Task(
+            skip_task=False,
+            job_settings={
+                "pipeline_monitor_settings": {
+                    "run_params": {
+                        "data_assets": [{"id": "", "mount": codeocean_pipeline_mount}],
+                        "pipeline_id": codeocean_pipeline_id,
+                    }
+                }
+            }
+        )
+
+        codeocean_pipeline_settings = {
+            Modality.POPHYS.abbreviation: pophys_codeocean_pipeline_settings
+        }
+
         #adding codeocean capsule ID and mount
-        pophys_config = ModalityConfigs(
-            modality=Modality.POPHYS,
-            source=(f"//allen/aind/scratch/BCI/2p-raw/{thisMouse}/{dateEnteredAs}/pophys"),
-        )
-        behavior_video_config = ModalityConfigs(
-            modality=Modality.BEHAVIOR_VIDEOS,
-            compress_raw_data=False,
-            source=(f"//allen/aind/scratch/BCI/2p-raw/{thisMouse}/{dateEnteredAs}/behavior_video"),
-        )
-        behavior_config = ModalityConfigs(
-            modality=Modality.BEHAVIOR,
-            source=(f"//allen/aind/scratch/BCI/2p-raw/{thisMouse}/{dateEnteredAs}/behavior"),
-        )
-        
-        upload_job_configs = BasicUploadJobConfigs(
+
+        upload_job_configs = UploadJobConfigsV2(
+            job_type=job_type,
             s3_bucket=s3_bucket,
             platform=platform,
             subject_id=subject_id,
-            acq_datetime= datetime.strptime(self.params['sessionStart'], "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%Y-%m-%d %H:%M:%S"),
-            modalities=[pophys_config, behavior_config, behavior_video_config],
-            metadata_dir=PurePosixPath(f"/allen/aind/scratch/BCI/2p-raw/{thisMouse}/{dateEnteredAs}"),
-            process_capsule_id=codeocean_pipeline_id,
+            acq_datetime=datetime.strptime(
+                self.params['sessionStart'], "%Y-%m-%dT%H:%M:%S.%f%z"
+            ).strftime("%Y-%m-%d %H:%M:%S"),
+            modalities=[Modality.POPHYS, Modality.BEHAVIOR, Modality.BEHAVIOR_VIDEOS],
             project_name=project_name,
-            input_data_mount=codeocean_pipeline_mount,
-            force_cloud_sync=False,
+            tasks={
+                "modality_transformation_settings": modality_transformation_settings,
+                "gather_preliminary_metadata": gather_preliminary_metadata,
+                "codeocean_pipeline_settings": codeocean_pipeline_settings,
+            },
         )
 
         upload_jobs = [upload_job_configs]
-        submit_request = SubmitJobRequest(upload_jobs=upload_jobs)
-        post_request_content = json.loads(submit_request.model_dump_json(exclude_none=True))
+        submit_request = SubmitJobRequestV2(upload_jobs=upload_jobs)
+        post_request_content = submit_request.model_dump(
+            mode="json", exclude_none=True
+        )
         
         #Submit request
         submit_job_response = requests.post(url=service_url, json=post_request_content)
         print(submit_job_response.status_code)
         print(submit_job_response.json())
         self.signals.nextStep.emit('Data Sent!')
-        
-
-        
